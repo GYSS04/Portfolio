@@ -1,0 +1,18 @@
+node_modules
+dist
+.DS_Store
+.claude/
+
+# unrelated project folder that happens to live in this directory
+P2P-messaging/
+
+# coursework notes, not part of the portfolio
+nw1_pages.txt
+nw2_report.txt
+
+# scratch/reference files from building the bunker scene — fully ported into
+# src/three/techBunker.ts and src/data/world-land-110m.json, kept out of the repo
+techbunker-artifact.html
+world-map.html
+hacker-map.html
+world-topo-inline.js
