@@ -20,7 +20,8 @@ Other scripts:
 ```bash
 npm run build      # production build to dist/
 npm run preview    # serve the production build locally
-npx tsc --noEmit   # type-check without emitting (run this before committing)
+npm run typecheck  # type-check without emitting
+npm run check      # type-check, then create a production build
 ```
 
 There is no test suite. Type-checking + manually walking through the scene in a
@@ -62,6 +63,7 @@ src/
                                   cabin's study nook, which uses real glTF models)
     assets.ts                   — loads the glTF model kit used by props.ts
     palette.ts                  — shared color constants
+    performance.ts              — device-aware quality, pixel ratio and frame-rate profile
 
 public/models/*.glb            — the low-poly furniture kit (glTF), used only by
                                   props.ts's buildStudyNook — everything in
@@ -79,11 +81,11 @@ touch). `Experience.tsx` is the thin React wrapper: it creates one `RoomScene` i
 `useEffect` and forwards DOM events into it.
 
 There are two "levels": `'cabin'` (the surface, at world Y = 0) and `'bunker'` (at
-world Y = `BUNKER_Y`, currently -14). Both are built once at startup and simply
-live in the same `THREE.Scene` stacked on top of each other in Y — moving between
-them is just teleporting the camera and swapping the `Level` string the movement
-code checks for bounds/obstacles. See `descend()` / `ascend()` / `teleportTo()` in
-`RoomScene.ts`.
+world Y = `BUNKER_Y`, currently -14). The exterior and cabin paint immediately;
+the much larger bunker is downloaded as a separate JavaScript chunk during the
+loading screen. Once ready, both levels live in the same `THREE.Scene` stacked on
+top of each other in Y. Moving between them teleports the camera and swaps the
+`Level` string used for movement bounds and obstacles.
 
 ### The interaction pattern (important — read this before adding a new object)
 
@@ -103,12 +105,9 @@ Every clickable/interactive object in the scene follows the same pattern:
 
 **Both `simpleCabin.ts` and `techBunker.ts` build their entire level as one fixed,
 hand-positioned scene and tag hit-meshes directly inline** — there's no generic
-"drop a prop at this position" system for them. (`layout.ts`'s `BUNKER_LAYOUT` /
-`CABIN_LAYOUT` / `BUILDERS` map is a leftover from an earlier, more generic
-approach; both are now empty arrays and the only thing still routed through them
-is the cabin's `education` object, purely so that indirection didn't need to be
-ripped out for no functional reason. Don't build new features on top of it —
-follow the hit-mesh-tagged-directly pattern instead.)
+"drop a prop at this position" system for them. `layout.ts`'s `BUNKER_LAYOUT` /
+`CABIN_LAYOUT` / `BUILDERS` map is retained for compatibility but its arrays are
+empty. Don't build new features on top of it; follow the direct hit-mesh pattern.
 
 ### Adding a new interactive object
 
@@ -159,10 +158,9 @@ This file is unusual and worth understanding before editing:
   (real world coastlines via `d3-geo` + `topojson-client`, animated links,
   scrolling log panels) and tiles it across a 4×3 grid of screen meshes. The
   redraw is throttled to ~12fps (`bunker.userData.updateScreen`, called from
-  `RoomScene.ts`'s animation loop) — it looked "live" at 60fps too, but a full
-  canvas redraw + 12 texture re-uploads every render frame was the single
-  biggest performance cost in the scene. Don't remove the throttle without a
-  reason.
+  `RoomScene.ts` only while the player is inside the bunker). It looked "live" at
+  60fps too, but a full canvas redraw + 12 texture re-uploads every render frame
+  was the single biggest performance cost in the scene.
 - **Repeated static geometry is merged**, not built as individual meshes. The
   stairwell in particular used to be ~75 separate boxes/cylinders (one draw call
   each); it's now merged per-material into a handful of meshes via
@@ -183,6 +181,16 @@ you're adding a new field's *layout*, not its content.
 
 ## Known gotchas
 
+- **Rendering quality is adaptive.** `performance.ts` selects a low, balanced or
+  high profile from device memory, CPU concurrency, pointer type and reduced-motion
+  preference. Low-power devices skip bloom and shadows, cap DPR at 1 and render at
+  30fps. The scene also drops to an idle cadence when paused and stops rendering in
+  a hidden tab. Keep new effects behind the same profile instead of making them
+  unconditional.
+- **Repeated cabin geometry must stay instanced.** The wood floor, log shell and
+  exterior forest use `InstancedMesh`; together they replace hundreds of separate
+  draw calls. Avoid converting those loops back into individual meshes.
+
 - **Hot Module Reload does not reliably pick up Three.js scene changes.**
   `Experience.tsx` constructs the entire `RoomScene` once, inside a
   `useEffect(() => { ... }, [])` with an empty dependency array. Vite's React
@@ -195,9 +203,8 @@ you're adding a new field's *layout*, not its content.
   development — don't skip it.
 - **Shadows are expensive; be deliberate about `castShadow` on lights.** A
   `THREE.PointLight` with `castShadow = true` renders a full 6-pass cubemap
-  shadow. There are currently only two shadow-casting lights in the whole scene
-  (the cabin fireplace and the workbench's desk lamp) — that's intentional, not
-  an oversight. Think twice before adding a third.
+  shadow. Only high-tier devices enable the fireplace shadow; low-tier devices
+  disable all dynamic shadows. Think twice before adding another shadow light.
 - **Textures generated at build time are cheap; textures redrawn per-frame are
   not.** Most of `techBunker.ts`'s `create*Texture()` functions draw onto a
   `<canvas>` once, at scene construction, and are effectively free afterward.

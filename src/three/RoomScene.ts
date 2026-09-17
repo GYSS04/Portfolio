@@ -12,8 +12,8 @@ import {
 import { PALETTE } from './palette';
 import { buildStudyNook } from './props';
 import { buildSimpleCabin, buildExteriorScene } from './simpleCabin';
-import { buildTechBunker } from './techBunker';
 import { loadModels, type ModelLibrary } from './assets';
+import { detectRenderProfile, type RenderProfile } from './performance';
 
 export type Level = 'cabin' | 'bunker';
 
@@ -45,7 +45,8 @@ export class RoomScene {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
   private camera: THREE.PerspectiveCamera;
-  private composer: EffectComposer;
+  private composer: EffectComposer | null = null;
+  private profile: RenderProfile;
   private raycaster = new THREE.Raycaster();
   private hitMeshes: THREE.Mesh[] = [];
   private lookTargetLabel: string | null = null;
@@ -73,25 +74,31 @@ export class RoomScene {
     fireLight?: THREE.PointLight;
   } = {};
   private opts: RoomSceneOptions;
-  private library: ModelLibrary | null = null;
   private bunkerUpdateScreen: ((now: number) => void) | null = null;
-  private debugEl: HTMLDivElement | null = null; // TEMP DEBUG
+  private bunkerUpdateServers: ((now: number) => void) | null = null;
+  private frameSize = new THREE.Vector2();
+  private centerNdc = new THREE.Vector2(0, 0);
+  private moveInput = new THREE.Vector2();
+  private forward = new THREE.Vector3();
+  private right = new THREE.Vector3();
+  private targetVelocity = new THREE.Vector3();
+  private lastRenderedAt = 0;
 
   constructor(opts: RoomSceneOptions) {
     this.opts = opts;
     const { canvas } = opts;
+    this.profile = detectRenderProfile();
 
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-    // capped at 1.5 instead of 2 — bloom + shadows both scale with pixel count, and on a
-    // 2x/3x-DPR display the jump from 1.5 to 2 is a 78% increase in fragment work for a
-    // barely-perceptible sharpness gain
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    this.renderer = new THREE.WebGLRenderer({
+      canvas,
+      antialias: this.profile.antialias,
+      powerPreference: 'high-performance',
+    });
+    this.renderer.setPixelRatio(this.profile.pixelRatio);
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.toneMappingExposure = 0.95;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.shadowMap.enabled = true;
-    // PCFSoft instead of VSM — VSM needs an extra blur pass per shadow map and was a
-    // real cost with two shadow-casting point/spot lights already in the scene
+    this.renderer.shadowMap.enabled = this.profile.shadows;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.scene.background = new THREE.Color(PALETTE.night);
@@ -100,11 +107,13 @@ export class RoomScene {
     this.camera = new THREE.PerspectiveCamera(BASE_FOV_DEG, 1, 0.08, 200);
     this.camera.rotation.order = 'YXZ';
 
-    this.composer = new EffectComposer(this.renderer);
-    this.composer.addPass(new RenderPass(this.scene, this.camera));
-    const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.35, 0.4, 0.78);
-    this.composer.addPass(bloom);
-    this.composer.addPass(new OutputPass());
+    if (this.profile.bloom) {
+      this.composer = new EffectComposer(this.renderer);
+      this.composer.addPass(new RenderPass(this.scene, this.camera));
+      const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.2, 0.35, 0.9);
+      this.composer.addPass(bloom);
+      this.composer.addPass(new OutputPass());
+    }
 
     this.buildLighting();
     const cabin = buildSimpleCabin();
@@ -115,18 +124,12 @@ export class RoomScene {
     if (cabin.userData.fireLight) {
       const fireLight = cabin.userData.fireLight as THREE.PointLight;
       this.spinRefs.fireLight = fireLight;
-      fireLight.castShadow = true;
-      fireLight.shadow.mapSize.set(1024, 1024);
+      fireLight.castShadow = this.profile.fireShadow;
+      fireLight.shadow.mapSize.set(512, 512);
       fireLight.shadow.camera.near = 0.1;
       fireLight.shadow.camera.far = 9;
       fireLight.shadow.bias = -0.002;
     }
-    const bunker = buildTechBunker();
-    bunker.position.y = BUNKER_Y;
-    this.scene.add(bunker);
-    const bunkerHits = (bunker.userData.hitMeshes as THREE.Mesh[] | undefined) ?? [];
-    this.hitMeshes.push(...bunkerHits);
-    if (bunker.userData.updateScreen) this.bunkerUpdateScreen = bunker.userData.updateScreen as (now: number) => void;
     this.scene.add(buildExteriorScene());
 
     this.camera.position.copy(EXTERIOR_SPAWN);
@@ -137,6 +140,7 @@ export class RoomScene {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('wheel', this.onWheel, { passive: true });
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
 
     const w = canvas.clientWidth || window.innerWidth;
     const h = canvas.clientHeight || window.innerHeight;
@@ -146,33 +150,43 @@ export class RoomScene {
     this.raf = requestAnimationFrame(this.animate);
 
     this.loadAndBuildFurniture();
-
-    // TEMP DEBUG — on-screen camera position readout, remove once furniture placement is settled
-    this.debugEl = document.createElement('div');
-    this.debugEl.style.cssText =
-      'position:fixed;top:8px;left:8px;z-index:9999;font:12px monospace;color:#0f0;background:rgba(0,0,0,0.6);padding:4px 8px;pointer-events:none;';
-    document.body.appendChild(this.debugEl);
   }
 
   /** Furniture depends on real glTF assets, loaded async; the room shell above renders immediately. */
   private async loadAndBuildFurniture() {
+    this.opts.onLoadProgress?.(0.12);
+    // The detailed underground level is a separate bundle. The lightweight exterior can paint
+    // immediately while the browser downloads/parses the bunker in the loading screen.
+    const { buildTechBunker } = await import('./techBunker');
+    if (this.disposed) return;
+    const bunker = buildTechBunker();
+    bunker.position.y = BUNKER_Y;
+    this.scene.add(bunker);
+    const bunkerHits = (bunker.userData.hitMeshes as THREE.Mesh[] | undefined) ?? [];
+    this.hitMeshes.push(...bunkerHits);
+    if (bunker.userData.updateScreen) this.bunkerUpdateScreen = bunker.userData.updateScreen as (now: number) => void;
+    if (bunker.userData.updateServers) this.bunkerUpdateServers = bunker.userData.updateServers as (now: number) => void;
+    if (!this.profile.shadows) {
+      bunker.traverse((object) => {
+        if ((object as THREE.Light).isLight) (object as THREE.Light).castShadow = false;
+      });
+    }
+    this.opts.onLoadProgress?.(0.85);
+
+    // The current cabin and bunker are procedural and already include their interactive props.
+    // Avoid fetching the legacy furniture kit when no layout entry actually uses it.
+    if (!LAYOUT.some((layout) => BUILDERS[layout.id])) {
+      this.opts.onLoadProgress?.(1);
+      requestAnimationFrame(() => this.opts.onReady());
+      return;
+    }
     const manager = new THREE.LoadingManager();
     manager.onProgress = (_url, loaded, total) => {
       this.opts.onLoadProgress?.(total > 0 ? loaded / total : 0);
     };
     const library = await loadModels(manager);
     if (this.disposed) return;
-    this.library = library;
     this.buildProps(library);
-
-    // every surface can both cast and receive shadows now that shadow mapping is on
-    this.scene.traverse((obj) => {
-      const mesh = obj as THREE.Mesh;
-      if ((mesh as THREE.Mesh).isMesh) {
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-      }
-    });
 
     this.opts.onLoadProgress?.(1);
     requestAnimationFrame(() => this.opts.onReady());
@@ -308,6 +322,14 @@ export class RoomScene {
     else if (e.deltaY > 0) this.zoomActive = false;
   };
 
+  private onVisibilityChange = () => {
+    this.clock.stop();
+    if (!document.hidden) {
+      this.clock.start();
+      this.lastRenderedAt = 0;
+    }
+  };
+
   tapInteract() {
     this.triggerInteract();
   }
@@ -369,13 +391,13 @@ export class RoomScene {
     this.camera.aspect = width / Math.max(height, 1);
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
-    this.composer.setSize(width, height);
+    this.composer?.setSize(width, height);
   }
 
   /* ---------------- per-frame update ---------------- */
 
   private updateMovement(dt: number) {
-    const input = new THREE.Vector2(0, 0);
+    const input = this.moveInput.set(0, 0);
     if (this.keys.KeyW || this.keys.ArrowUp) input.y += 1;
     if (this.keys.KeyS || this.keys.ArrowDown) input.y -= 1;
     if (this.keys.KeyD || this.keys.ArrowRight) input.x += 1;
@@ -384,13 +406,13 @@ export class RoomScene {
     input.y += this.touchMove.y;
     if (input.lengthSq() > 1) input.normalize();
 
-    const forward = new THREE.Vector3();
+    const forward = this.forward;
     this.camera.getWorldDirection(forward);
     forward.y = 0;
     forward.normalize();
-    const right = new THREE.Vector3().crossVectors(forward, this.camera.up).normalize();
+    const right = this.right.crossVectors(forward, this.camera.up).normalize();
 
-    const targetVel = new THREE.Vector3()
+    const targetVel = this.targetVelocity.set(0, 0, 0)
       .addScaledVector(right, input.x)
       .addScaledVector(forward, input.y)
       .multiplyScalar(MOVE_SPEED);
@@ -430,7 +452,7 @@ export class RoomScene {
   }
 
   private updateInteractRaycast() {
-    this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+    this.raycaster.setFromCamera(this.centerNdc, this.camera);
     this.raycaster.far = INTERACT_DIST;
     const hits = this.raycaster.intersectObjects(this.hitMeshes, false);
     const hit = hits[0];
@@ -450,12 +472,20 @@ export class RoomScene {
 
   private animate() {
     if (this.disposed) return;
-    const size = this.renderer.getSize(new THREE.Vector2());
+    this.raf = requestAnimationFrame(this.animate);
+    if (document.hidden) return;
+
+    const size = this.renderer.getSize(this.frameSize);
     if (size.x <= 0 || size.y <= 0) {
-      this.raf = requestAnimationFrame(this.animate);
       return;
     }
-    this.raf = requestAnimationFrame(this.animate);
+
+    const now = performance.now();
+    const isInteractive = (this.locked || this.touchActive) && !this.paused && this.everEntered;
+    const targetFps = isInteractive ? this.profile.activeFps : this.profile.idleFps;
+    if (now - this.lastRenderedAt < 1000 / targetFps) return;
+    this.lastRenderedAt = now;
+
     const dt = Math.min(this.clock.getDelta(), 0.05);
     const t = this.clock.getElapsedTime();
 
@@ -466,7 +496,7 @@ export class RoomScene {
       this.camera.lookAt(EXTERIOR_LOOK_AT);
     }
 
-    const active = (this.locked || this.touchActive) && !this.paused && this.everEntered;
+    const active = isInteractive;
     if (active) {
       this.updateMovement(dt);
       this.updateInteractRaycast();
@@ -497,7 +527,7 @@ export class RoomScene {
         m.emissiveIntensity = 1.2 + Math.sin(t * 4 + i) * 0.5;
       });
     }
-    if (this.spinRefs.flames) {
+    if (this.level === 'cabin' && this.spinRefs.flames) {
       this.spinRefs.flames.forEach((flame, i) => {
         const flicker = Math.sin(t * 11 + i * 2.1) * 0.4 + Math.sin(t * 23 + i) * 0.2;
         flame.scale.y = 1 + flicker * 0.25;
@@ -505,17 +535,16 @@ export class RoomScene {
         m.emissiveIntensity = 1.9 + flicker;
       });
     }
-    if (this.spinRefs.fireLight) {
-      this.spinRefs.fireLight.intensity = 5.2 + Math.sin(t * 14) * 0.6 + Math.sin(t * 6) * 0.4;
+    if (this.level === 'cabin' && this.spinRefs.fireLight) {
+      this.spinRefs.fireLight.intensity = 30 + Math.sin(t * 14) * 3 + Math.sin(t * 6) * 2;
     }
-    if (this.bunkerUpdateScreen) this.bunkerUpdateScreen(performance.now());
-
-    if (this.debugEl) {
-      const p = this.camera.position;
-      this.debugEl.textContent = `${this.level}  x:${p.x.toFixed(1)} y:${p.y.toFixed(1)} z:${p.z.toFixed(1)}  yaw:${this.camera.rotation.y.toFixed(2)}`;
+    if (this.level === 'bunker' && !this.paused) {
+      this.bunkerUpdateScreen?.(now);
+      this.bunkerUpdateServers?.(now);
     }
 
-    this.composer.render();
+    if (this.composer) this.composer.render();
+    else this.renderer.render(this.scene, this.camera);
   }
 
   dispose() {
@@ -526,7 +555,20 @@ export class RoomScene {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('wheel', this.onWheel);
-    this.debugEl?.remove(); // TEMP DEBUG
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.scene.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      mesh.geometry?.dispose();
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const material of materials) {
+        for (const value of Object.values(material)) {
+          if (value instanceof THREE.Texture) value.dispose();
+        }
+        material.dispose();
+      }
+    });
+    this.composer?.dispose();
     this.renderer.dispose();
   }
 }

@@ -1617,8 +1617,12 @@ export function buildTechBunker(): THREE.Group {
 
   hitbox(2.2, 4.5, RACK_W * 4 + 0.6, 9.5, 2.6, RACK_ROW_CENTER - RACK_W / 2, { sectionId: 'skills' });
 
-  // subtle blink: every so often, re-roll one rack's LED texture
-  setInterval(() => {
+  // Subtle rack blink. RoomScene calls this only while the bunker is visible, which avoids
+  // a permanent background timer and texture upload after the scene has been left or disposed.
+  let lastServerUpdate = 0;
+  bunker.userData.updateServers = (now: number) => {
+    if (now - lastServerUpdate < 900) return;
+    lastServerUpdate = now;
     const rp = rackPanels[Math.floor(Math.random() * rackPanels.length)];
     rp.seed += 191;
     const tex = createServerPanelTexture(rp.seed);
@@ -1626,7 +1630,7 @@ export function buildTechBunker(): THREE.Group {
     rp.mat.map = tex;
     rp.mat.emissiveMap = tex;
     rp.mat.needsUpdate = true;
-  }, 550);
+  };
 
   const serverLight = new THREE.PointLight(0xc21eff, 65, 18);
   serverLight.position.set(8, 4, RACK_ROW_CENTER);
