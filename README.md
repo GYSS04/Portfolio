@@ -8,6 +8,8 @@ wall / desk monitors) opens a fake Linux desktop instead of a content panel.
 Built with **React 19 + TypeScript + Vite**, with the actual 3D scene running in
 **Three.js** underneath React (React owns the UI chrome; Three.js owns the canvas).
 
+**Live site:** [ghayas-portfolio.pages.dev](https://ghayas-portfolio.pages.dev/)
+
 ## Quick start
 
 ```bash
@@ -22,6 +24,7 @@ npm run build      # production build to dist/
 npm run preview    # serve the production build locally
 npm run typecheck  # type-check without emitting
 npm run check      # type-check, then create a production build
+npm run deploy:pages # verify and publish to the Cloudflare Pages project
 ```
 
 There is no test suite. Type-checking + manually walking through the scene in a

@@ -8,6 +8,7 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run build",
+    "deploy:pages": "npm run check && npx wrangler pages deploy dist --project-name ghayas-portfolio --branch master",
     "preview": "vite preview"
   },
   "license": "ISC",
