@@ -22,8 +22,8 @@ export const PROFILE = {
   location: 'Mississauga, ON',
   phone: '437-258-2244',
   email: 'sghayas12@gmail.com',
-  github: 'github.com/Designer45',
-  githubUrl: 'https://github.com/Designer45',
+  github: 'github.com/GYSS04',
+  githubUrl: 'https://github.com/GYSS04',
   tagline:
     'Networking & IT Security student building secure systems, analyzing data, and shipping software — currently grounded between the tarmac at YYZ and the books at Ontario Tech.',
 };
